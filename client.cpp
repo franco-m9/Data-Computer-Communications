@@ -1,0 +1,163 @@
+#include "common.h"
+#include "client.h"
+#include "math.h"
+
+#define _INCLUDE_RTT_CODE_
+
+int SERVERPORT = 51000;
+//char SERVERNODE[100] = "lingprog8.cs.fsu.edu";
+char SERVERNODE[100] = "ec2-3-135-62-114.us-east-2.compute.amazonaws.com";
+//char SERVERNODE[100] = "localhost";
+char SERVERIP[40];
+
+char server_sock_buf[MY_SOCK_BUFFER_LEN];
+int server_sock_buf_byte_counter;
+fd_set master;   
+fd_set read_fds;   
+int highestsocket = -1;
+int serversockfd = -1;
+char local_buffer[MY_SOCK_BUFFER_LEN];
+double current = 0;
+int counter = 0;
+double previous = 0;
+double sum = 0;
+
+int connect_to_server(const char* IP, int PORT)
+{
+    struct sockaddr_in server_addr; // peer address\n";
+    int sockfd;
+    
+    if ((sockfd = socket(PF_INET, SOCK_STREAM, 0)) == -1) {
+        printf("Cannot create a socket");
+        return -1;
+    }
+    
+    server_addr.sin_family = AF_INET;    // host byte order 
+    server_addr.sin_port = htons(PORT);  // short, network byte order 
+    inet_aton(IP, (struct in_addr *)&server_addr.sin_addr.s_addr);
+    memset(&(server_addr.sin_zero), '\0', 8);  // zero the rest of the struct 
+
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(struct sockaddr)) == -1) {
+         printf("Error connecting to the server %s on port %d\n",IP,PORT);
+         sockfd = -1;
+    }
+
+    if (sockfd != -1)  {
+        FD_SET(sockfd, &master);
+        if (highestsocket <= sockfd) {
+            highestsocket = sockfd;
+        } 
+    }
+    return sockfd; 
+}
+
+void client_init(void)
+{
+    struct hostent     *he_server;
+    if ((he_server = gethostbyname(SERVERNODE)) == NULL) {
+        printf("error resolving hostnam for server %s\n",SERVERNODE);
+        fflush(stdout);
+        exit(1);
+    }
+
+    struct sockaddr_in  server;
+    memcpy(&server.sin_addr, he_server->h_addr_list[0], he_server->h_length);
+    printf("SERVER IP is %s\n",inet_ntoa(server.sin_addr));
+    strcpy(SERVERIP,inet_ntoa(server.sin_addr));
+
+    FD_ZERO(&master);    // clear the master and temp sets
+    FD_ZERO(&read_fds);
+    
+    serversockfd =  connect_to_server(SERVERIP,SERVERPORT);
+    printf("Connected to the server on socket %d\n",serversockfd); 
+
+     FD_SET(fileno(stdin), &master);
+     if (fileno(stdin) > highestsocket) {
+          highestsocket = fileno(stdin);
+     }
+}
+
+void process_server_message(Packet *packet)
+{
+    //printf("got something on socket %d from the server\n",serversockfd); 
+    // TODO
+        counter++;
+	if(counter%2==0)
+		current = getcurrenttime();
+	else
+		previous = getcurrenttime();
+
+	if(current!=0 && previous!=0)
+		if(counter%2==0)
+			sum += current-previous;
+		else
+			sum += previous-current;
+
+	memcpy(local_buffer,packet,sizeof(local_buffer));
+	cout << local_buffer;
+}
+
+
+void read_from_activesockets(void)
+{
+    int nbytes;
+    unsigned char buf[10000];	
+
+    if ((serversockfd != -1) && FD_ISSET(serversockfd,&read_fds) ) {
+        nbytes = recv(serversockfd, buf, MAXBUFLEN, 0);
+        // handle server response or data         
+        if ( nbytes <= 0) {
+            // got error or connection closed by client
+            if (nbytes == 0) {
+		// TODO
+		cout << endl << "INTERVAL: ";
+                cout << sum / counter << endl;
+		exit(0);
+            } else {
+                printf("client recv error from server \n");
+            }
+            close(serversockfd); // bye!
+            FD_CLR(serversockfd, &master); // remove from master set
+            serversockfd = -1;
+        } else {
+            memcpy(server_sock_buf + server_sock_buf_byte_counter, buf, nbytes);
+            server_sock_buf_byte_counter += nbytes;
+            int num_to_read = sizeof(Packet);
+            while (num_to_read <= server_sock_buf_byte_counter) {
+                Packet* packet = (Packet*) (server_sock_buf);     
+                process_server_message(packet);
+                remove_read_from_buf(server_sock_buf, num_to_read);
+                server_sock_buf_byte_counter -= num_to_read;
+            }
+        }
+     }
+}
+
+void client_run(void)
+{
+    while (1) {
+        read_fds = master; 
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000;
+
+        if (select(highestsocket+1, &read_fds, NULL, NULL, &timeout) == -1) {
+            if (errno == EINTR) {
+                printf("Select for client interrupted by interrupt...\n");
+            } else {
+                printf("Select problem .. client exiting iteration\n");
+                fflush(stdout);
+                exit(1);
+            }
+        }
+        read_from_activesockets();
+    }           
+}
+
+int main(int argc, char** argv)
+{
+    client_init();
+    client_run();
+    return 0;
+}
+
